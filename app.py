@@ -1,31 +1,148 @@
 import streamlit as st
 import clickhouse_connect
 import PyPDF2
-import streamlit as st
-import clickhouse_connect
+import uuid
+from datetime import datetime
 
-# --- 1. LETAKKAN KODE KONEKSI DI SINI ---
-def get_clickhouse_client():
+# --- KONFIGURASI HALAMAN (Harus di baris paling atas) ---
+st.set_page_config(page_title="Sistem Cek Kemiripan Dokumen", layout="wide")
+
+# Konfigurasi Admin (Ubah password sesuai keinginan Anda)
+ADMIN_PASSWORD = "admin_rahasia_wa"
+
+# Inisialisasi Session State
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
+if "token_info" not in st.session_state:
+    st.session_state.token_info = {}
+
+# Fungsi koneksi ke ClickHouse (Menggunakan parameter yang konsisten dengan Secrets)
+def get_db_client():
     ch_config = st.secrets["clickhouse"]
     return clickhouse_connect.get_client(
         host=ch_config["host"],
-        port=ch_config.get("port", 8443),
+        port=int(ch_config.get("port", 8443)),
         user=ch_config["user"],
         password=ch_config["password"],
-        secure=ch_config.get("secure", True)
+        secure=bool(ch_config.get("secure", True))
     )
 
-try:
-    client = get_clickhouse_client()
-    # Tes koneksi sederhana
-    result = client.query("SELECT 1").result_set[0][0]
-    st.success("Berhasil terhubung ke ClickHouse Cloud!")
-except Exception as e:
-    st.error(f"Koneksi database belum dikonfigurasi atau gagal terhubung: {e}")
+# ==========================================
+# 1. HALAMAN PANEL ADMIN (Untuk Admin WhatsApp)
+# ==========================================
+def render_admin_panel():
+    st.sidebar.title("🛠️ Panel Admin WhatsApp")
+    st.sidebar.write("Kelola pembuatan token akses pengguna.")
+    
+    admin_pass_input = st.sidebar.text_input("Password Admin:", type="password")
+    
+    if admin_pass_input == ADMIN_PASSWORD:
+        st.sidebar.success("Admin Logged In")
+        st.subheader("🔑 Buat Token Akses Baru")
+        
+        with st.form("create_token_form"):
+            package_name = st.text_input("Nama Paket / Keterangan (Cth: Paket 5x Cek)", value="Sekali Pakai")
+            quota_amount = st.number_input("Jumlah Kuota Token:", min_value=1, max_value=100, value=1)
+            submit_token = st.form_submit_button("Generate Token")
+            
+            if submit_token:
+                new_token = "TOK-" + str(uuid.uuid4())[:8].upper()
+                
+                try:
+                    client = get_db_client()
+                    query = """
+                        INSERT INTO default.app_tokens (token, package_name, quota, created_at, is_active) 
+                        VALUES ({token:String}, {pkg:String}, {quota:Int32}, {date:DateTime}, 1)
+                    """
+                    client.command(query, parameters={
+                        "token": new_token,
+                        "pkg": package_name,
+                        "quota": int(quota_amount),
+                        "date": datetime.now()
+                    })
+                    
+                    st.success("Token berhasil dibuat!")
+                    st.markdown(f"### Salin teks ini untuk dikirim via WhatsApp:\n> `{new_token}`")
+                    st.info(f"Paket: {package_name} | Kuota: {quota_amount}x pakai")
+                except Exception as e:
+                    st.error(f"Gagal menyimpan token ke database: {e}")
+        
+        st.subheader("📋 Daftar Token di Database")
+        try:
+            client = get_db_client()
+            tokens_df = client.query_df("SELECT token, package_name, quota, created_at FROM default.app_tokens ORDER BY created_at DESC LIMIT 10")
+            st.dataframe(tokens_df)
+        except Exception:
+            pass
+            
+        if st.sidebar.button("Keluar Mode Admin"):
+            st.session_state.is_admin = False
+            st.rerun()
+        st.stop()
 
+if not st.session_state.authenticated and not st.session_state.is_admin:
+    if st.sidebar.button("Masuk sebagai Admin"):
+        st.session_state.is_admin = True
+        st.rerun()
 
-# --- KONFIGURASI HALAMAN ---
-st.set_page_config(page_title="Sistem Cek Kemiripan", layout="wide")
+if st.session_state.is_admin:
+    render_admin_panel()
+
+# ==========================================
+# 2. LOGIKA VERIFIKASI TOKEN USER
+# ==========================================
+def verify_user_token(token_input):
+    try:
+        client = get_db_client()
+        query = "SELECT package_name, quota FROM default.app_tokens WHERE token = {token:String} AND is_active = 1"
+        result = client.query(query, parameters={"token": token_input})
+        
+        if not result.result_rows:
+            return False, "Token tidak valid atau sudah tidak aktif."
+            
+        pkg_name, current_quota = result.result_rows[0]
+        
+        if current_quota <= 0:
+            return False, "Kuota token ini sudah habis."
+            
+        new_quota = current_quota - 1
+        update_query = "ALTER TABLE default.app_tokens UPDATE quota = {new_quota:Int32} WHERE token = {token:String}"
+        client.command(update_query, parameters={"new_quota": new_quota, "token": token_input})
+        
+        return True, {"package": pkg_name, "remaining_quota": new_quota}
+        
+    except Exception as e:
+        return False, f"Kendala koneksi sistem: {e}"
+
+# Tampilan Halaman Login User
+if not st.session_state.authenticated:
+    st.title("🔒 Masukkan Kode Akses Token")
+    st.write("Silakan masukkan kode token yang Anda beli dari Admin melalui WhatsApp.")
+    
+    token_input = st.text_input("Kode Token Anda:", type="default")
+    
+    if st.button("Masuk Aplikasi"):
+        if token_input.strip():
+            with st.spinner("Memvalidasi kode token..."):
+                success, data_or_msg = verify_user_token(token_input.strip())
+                if success:
+                    st.session_state.authenticated = True
+                    st.session_state.token_info = data_or_msg
+                    st.session_state.token_code = token_input.strip()
+                    st.success(f"Berhasil masuk! Paket: {data_or_msg['package']} | Sisa kuota Anda: {data_or_msg['remaining_quota']}x")
+                    st.rerun()
+                else:
+                    st.error(data_or_msg)
+        else:
+            st.warning("Mohon masukkan kode token terlebih dahulu.")
+            
+    st.stop()
+
+# ==========================================
+# 3. APLIKASI UTAMA (Setelah Berhasil Login)
+# ==========================================
 
 # --- CSS UNTUK TOOLTIP (Menampilkan Sumber Referensi) ---
 st.markdown("""
@@ -33,7 +150,7 @@ st.markdown("""
 .tooltip {
   position: relative;
   display: inline-block;
-  background-color: #ffcccc; /* Warna sorotan merah muda ala Turnitin */
+  background-color: #ffcccc; 
   cursor: pointer;
   padding: 0 4px;
   border-radius: 3px;
@@ -62,30 +179,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- HEADER APLIKASI ---
-st.title("Sistem Pengecekan Kemiripan Dokumen")
+st.title("📄 Sistem Pengecekan Kemiripan Dokumen")
 st.caption("🔒 Mode: No Repository (Aman untuk Draf Publikasi)")
 
-# --- INISIALISASI DATABASE CLICKHOUSE ---
-@st.cache_resource
-def init_connection():
-    try:
-        return clickhouse_connect.get_client(
-            host=st.secrets["clickhouse"]["host"],
-            port=st.secrets["clickhouse"]["port"],
-            username=st.secrets["clickhouse"]["username"],
-            password=st.secrets["clickhouse"]["password"],
-            secure=True
-        )
-    except Exception as e:
-        return None
-
-client = init_connection()
-
-if client is None:
-    st.info("Koneksi database belum dikonfigurasi. Lengkapi Streamlit Secrets setelah deploy.")
-else:
-    st.success("Terkoneksi dengan Database Utama.")
+# Informasi Kuota Token di Sidebar/Atas
+st.sidebar.info(f"📦 **Paket:** {st.session_state.token_info.get('package')}\n\n🔢 **Sisa Kuota:** {st.session_state.token_info.get('remaining_quota')}x")
+if st.sidebar.button("Keluar / Ganti Token"):
+    st.session_state.authenticated = False
+    st.rerun()
 
 # --- SIDEBAR (PENGATURAN) ---
 st.sidebar.header("Filter Pengecekan")
@@ -93,11 +194,10 @@ exclude_quotes = st.sidebar.checkbox("Exclude Quotes (Abaikan Kutipan)", value=T
 exclude_biblio = st.sidebar.checkbox("Exclude Bibliography (Abaikan Daftar Pustaka)", value=True)
 
 # --- AREA UNGGAH DOKUMEN ---
-st.write("### Unggah Draf")
+st.write("### Unggah Draf Dokumen")
 uploaded_file = st.file_uploader("Pilih dokumen berformat PDF", type="pdf")
 
 if uploaded_file is not None:
-    # Membaca PDF
     pdf_reader = PyPDF2.PdfReader(uploaded_file)
     total_pages = len(pdf_reader.pages)
     
@@ -105,8 +205,6 @@ if uploaded_file is not None:
     
     if st.button("Jalankan Pengecekan", type="primary"):
         with st.spinner("Memproses N-grams dan mencocokkan ke database..."):
-            
-            # TODO: Di sinilah logika pemrosesan teks dan kueri ClickHouse akan dibangun nanti
             
             # --- SIMULASI HASIL LAPORAN (Integrity Overview) ---
             st.markdown("---")
