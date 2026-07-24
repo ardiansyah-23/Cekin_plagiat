@@ -1,0 +1,9 @@
+# Mengabaikan folder secrets Streamlit agar password database aman
+.streamlit/
+
+# Mengabaikan file sistem Python
+__pycache__/
+*.pyc
+
+# Mengabaikan file PDF yang mungkin tersimpan secara lokal saat testing
+*.pdf
