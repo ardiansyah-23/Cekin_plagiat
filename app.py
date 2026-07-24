@@ -4,11 +4,13 @@ import PyPDF2
 import uuid
 from datetime import datetime
 
-# --- KONFIGURASI HALAMAN (Harus di baris paling atas) ---
+import streamlit as st
+
+# --- KONFIGURASI HALAMAN ---
 st.set_page_config(page_title="Sistem Cek Kemiripan Dokumen", layout="wide")
 
-# Konfigurasi Admin (Ubah password sesuai keinginan Anda)
-ADMIN_PASSWORD = "admin_rahasia_wa"
+# Mengambil password admin secara aman dari secrets
+ADMIN_PASSWORD = st.secrets["admin"]["password"]
 
 # Inisialisasi Session State
 if "authenticated" not in st.session_state:
