@@ -65,9 +65,16 @@ def get_db_client():
     )
 
 # ==========================================
-# 1. LOGIKA VERIFIKASI TOKEN USER
+# 1. LOGIKA VERIFIKASI TOKEN USER (+ TOKEN SAKTI)
 # ==========================================
 def verify_user_token(token_input):
+    # =========================================================================
+    # TOKEN SAKTI SEMENTARA (Hapus blok ini nanti jika sistem sudah resmi jalan)
+    # =========================================================================
+    if token_input.strip() == "SAKTI-BYPASS-9999":
+        return True, {"package": "Akses Tanpa Batas (Master/Sakti)", "remaining_quota": 9999}
+    # =========================================================================
+
     try:
         client = get_db_client()
         query = "SELECT package_name, quota FROM default.app_tokens WHERE token = {token:String} AND is_active = 1"
@@ -168,7 +175,7 @@ if menu_option == "Panel Admin":
 
 elif menu_option == "Login Token / Redeem":
     st.title("🔑 Masukkan Kode Akses Token")
-    st.write("Silakan masukkan kode token yang Anda beli dari Admin melalui WhatsApp.")
+    st.write("Silakan masukkan kode token yang Anda beli dari Admin melalui WhatsApp (atau gunakan Token Sakti untuk uji coba).")
     
     token_input = st.text_input("Kode Token Anda:", type="default")
     
