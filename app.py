@@ -1,6 +1,28 @@
 import streamlit as st
 import clickhouse_connect
 import PyPDF2
+import streamlit as st
+import clickhouse_connect
+
+# --- 1. LETAKKAN KODE KONEKSI DI SINI ---
+def get_clickhouse_client():
+    ch_config = st.secrets["clickhouse"]
+    return clickhouse_connect.get_client(
+        host=ch_config["host"],
+        port=ch_config.get("port", 8443),
+        user=ch_config["user"],
+        password=ch_config["password"],
+        secure=ch_config.get("secure", True)
+    )
+
+try:
+    client = get_clickhouse_client()
+    # Tes koneksi sederhana
+    result = client.query("SELECT 1").result_set[0][0]
+    st.success("Berhasil terhubung ke ClickHouse Cloud!")
+except Exception as e:
+    st.error(f"Koneksi database belum dikonfigurasi atau gagal terhubung: {e}")
+
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(page_title="Sistem Cek Kemiripan", layout="wide")
