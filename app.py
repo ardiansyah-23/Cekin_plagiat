@@ -185,6 +185,7 @@ else:
                                     candidate_title = search_results[0].get("title", "Sumber Internet")
                                     
                                     if candidate_url:
+                                        # Scraper berjalan di sini
                                         scraped_content = scrape_web_text(candidate_url)
                                         if sentence.lower() in scraped_content.lower():
                                             matched_count += 1
@@ -195,10 +196,11 @@ else:
                                                 "index": source_index,
                                                 "url": candidate_url,
                                                 "title": candidate_title,
-                                                "color": bg_color
+                                                "color": bg_color,
+                                                "scraper_engine": "BeautifulSoup" # Info scraper disimpan di sini
                                             })
                                             
-                                            # Format Teks Highlight ala Turnitin
+                                            # Format Teks Highlight ala Turnitin (Ditambah label scraper)
                                             highlighted_html += f"""
                                             <span class="highlight-container">
                                                 <span style="background-color: {bg_color}; padding: 2px; border-radius: 2px;" onclick="togglePopup(this)">
@@ -206,7 +208,8 @@ else:
                                                 </span>
                                                 <div class="plagiarized-popup">
                                                     <b>Sumber Terdeteksi [{source_index}]:</b><br>
-                                                    <a href="{candidate_url}" target="_blank" style="color: #4da6ff;">{candidate_title}</a>
+                                                    <a href="{candidate_url}" target="_blank" style="color: #4da6ff;">{candidate_title}</a><br>
+                                                    <span style="font-size: 11px; color: #aaa;">Scraped via: BeautifulSoup</span>
                                                 </div>
                                             </span> """
                                             continue 
@@ -231,12 +234,14 @@ else:
                                 st.markdown(f'<div class="turnitin-source-list"><p class="turnitin-score">{similarity_percentage}%</p><p style="font-weight:bold; color:#555;">Overall Similarity</p><hr>', unsafe_allow_html=True)
                                 
                                 for src in found_sources:
+                                    # Label scraper ditampilkan di sidebar
                                     st.markdown(f"""
-                                    <div style="margin-bottom: 10px;">
+                                    <div style="margin-bottom: 12px; line-height: 1.3;">
                                         <span style="background-color: {src['color']}; padding: 2px 6px; font-weight: bold; border-radius: 3px; font-size: 12px;">{src['index']}</span>
                                         <span style="font-size: 14px; margin-left: 5px;">
                                             <a href="{src['url']}" target="_blank" style="color: #333; text-decoration: none;">{src['title'][:35]}...</a>
-                                        </span>
+                                        </span><br>
+                                        <span style="font-size: 11px; color: #888; margin-left: 30px;">Scraped via: {src['scraper_engine']}</span>
                                     </div>
                                     """, unsafe_allow_html=True)
                                 st.markdown("</div>", unsafe_allow_html=True)
