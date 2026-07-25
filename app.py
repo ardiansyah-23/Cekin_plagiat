@@ -5,7 +5,7 @@ import docx
 import uuid
 import re
 import requests
-import time  # <--- TAMBAHKAN INI DI ATAS
+import time
 from bs4 import BeautifulSoup
 from datetime import datetime
 from duckduckgo_search import DDGS
@@ -60,7 +60,6 @@ def create_pdf_report(filename, similarity, sources):
         pdf.cell(200, 10, txt="Daftar Sumber Terdeteksi:", ln=True)
         pdf.set_font("Arial", '', 10)
         for src in sources:
-            # Membersihkan karakter aneh dari internet agar PDF tidak error
             safe_title = str(src['title']).encode('latin-1', 'replace').decode('latin-1')
             pdf.multi_cell(0, 8, txt=f"[{src['index']}] {safe_title}")
             pdf.set_text_color(0, 0, 255)
@@ -70,7 +69,6 @@ def create_pdf_report(filename, similarity, sources):
     else:
         pdf.cell(200, 10, txt="Dokumen aman, tidak ada indikasi plagiasi.", ln=True)
 
-    # Mengembalikan file PDF dalam bentuk byte untuk diunduh
     return bytes(pdf.output(dest='S').encode('latin-1'))
 
 # --- FUNGSI WEB SCRAPER DENGAN BEAUTIFULSOUP ---
@@ -171,14 +169,12 @@ else:
     st.title("📄 Sistem Pengecekan Kemiripan Dokumen")
     st.caption("🔍 Engine: Turnitin-Style Web Search | Mendukung PDF, DOCX, TXT")
 
-    # Menerima PDF, DOCX, dan TXT
     uploaded_file = st.file_uploader("Pilih dokumen (Maks. 200MB)", type=["pdf", "docx", "txt"])
 
     if uploaded_file is not None:
         extracted_text = ""
         file_extension = uploaded_file.name.split('.')[-1].lower()
         
-        # Logika Ekstraksi Teks Berdasarkan Format File
         try:
             if file_extension == "pdf":
                 pdf_reader = PyPDF2.PdfReader(uploaded_file)
@@ -201,12 +197,10 @@ else:
                 if redeem_token_quota(st.session_state.token_code):
                     _, updated_info = check_token_validity(st.session_state.token_code)
                     st.session_state.token_info = updated_info
-               with st.spinner("Menelusuri internet & menganalisis dokumen... (Proses ini akan memakan waktu lama untuk 1 file penuh)"):
+                    
+                    with st.spinner("Menelusuri internet & menganalisis dokumen... (Proses ini memakan waktu lama untuk 1 file penuh)"):
                         sentences = re.split(r'(?<=[.!?]) +', extracted_text)
-                        valid_sentences = [s.strip() for s in sentences if len(s.split()) > 7]
-                        
-                        # MENGHAPUS LIMIT: Sekarang memproses seluruh kalimat di dalam dokumen
-                        sentences_to_check = valid_sentences 
+                        sentences_to_check = [s.strip() for s in sentences if len(s.split()) > 7]
                         
                         found_sources = []
                         highlighted_html = ""
@@ -215,15 +209,14 @@ else:
                         
                         ddgs = DDGS()
                         
-                        # MENAMBAHKAN PROGRESS BAR AGAR UI TIDAK HANG
                         progress_bar = st.progress(0)
                         status_text = st.empty()
                         total_sentences = len(sentences_to_check)
                         
                         for i, sentence in enumerate(sentences_to_check):
-                            # Update indikator progress di layar
                             status_text.text(f"Menganalisis kalimat {i+1} dari {total_sentences}...")
-                            progress_bar.progress((i + 1) / total_sentences)
+                            if total_sentences > 0:
+                                progress_bar.progress((i + 1) / total_sentences)
                             
                             try:
                                 search_results = list(ddgs.text(f'"{sentence}"', max_results=1))
@@ -257,17 +250,13 @@ else:
                                                     <span style="font-size: 11px; color: #aaa;">Scraped via: BeautifulSoup</span>
                                                 </div>
                                             </span> """
-                                            # Jeda agar tidak kena blokir jika berhasil scrape
-                                            time.sleep(2) 
+                                            time.sleep(2)
                                             continue 
                             except Exception: pass
                             
                             highlighted_html += f"{sentence} "
-                            
-                            # WAJIB ADA: Jeda 2 detik per pencarian untuk menghindari blokir IP (Rate Limit 429)
                             time.sleep(2)
 
-                        # Menghapus progress bar dari layar setelah selesai 100%
                         progress_bar.empty()
                         status_text.empty()
 
@@ -278,7 +267,7 @@ else:
                             col1, col2 = st.columns([2, 1])
                             with col1:
                                 st.write("### Pratinjau Dokumen")
-                                st.markdown(f'<div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0; font-family: serif;">{highlighted_html} ... [Sisa teks diproses]</div>', unsafe_allow_html=True)
+                                st.markdown(f'<div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0; font-family: serif;">{highlighted_html}</div>', unsafe_allow_html=True)
                             with col2:
                                 st.write("### Integrity Overview")
                                 st.markdown(f'<div class="turnitin-source-list"><p class="turnitin-score">{similarity_percentage}%</p><p style="font-weight:bold; color:#555;">Overall Similarity</p><hr>', unsafe_allow_html=True)
@@ -296,12 +285,11 @@ else:
                             with col1:
                                 st.write("### Pratinjau Dokumen")
                                 safe_text = " ".join(sentences_to_check)
-                                st.markdown(f'<div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0; font-family: serif;">{safe_text} ... [Sisa teks diproses]</div>', unsafe_allow_html=True)
+                                st.markdown(f'<div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0; font-family: serif;">{safe_text}</div>', unsafe_allow_html=True)
                             with col2:
                                 st.write("### Integrity Overview")
                                 st.markdown('<div class="turnitin-source-list"><p style="font-size: 48px; font-weight: bold; color: #28a745; margin-bottom: 0;">0%</p><p style="font-weight:bold; color:#555;">Overall Similarity</p><hr><p style="color:#777; font-size:14px;">Bebas dari deteksi plagiasi internet.</p></div>', unsafe_allow_html=True)
                         
-                        # --- TOMBOL UNDUH LAPORAN PDF ---
                         st.markdown("---")
                         try:
                             pdf_data = create_pdf_report(uploaded_file.name, similarity_percentage, found_sources)
