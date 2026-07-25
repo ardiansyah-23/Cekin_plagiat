@@ -2,3 +2,5 @@ streamlit
 clickhouse-connect
 PyPDF2
 duckduckgo-search
+beautifulsoup4
+requests
