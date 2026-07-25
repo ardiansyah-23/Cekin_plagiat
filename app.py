@@ -5,6 +5,7 @@ import docx
 import uuid
 import re
 import requests
+import time  # <--- TAMBAHKAN INI DI ATAS
 from bs4 import BeautifulSoup
 from datetime import datetime
 from duckduckgo_search import DDGS
@@ -200,13 +201,12 @@ else:
                 if redeem_token_quota(st.session_state.token_code):
                     _, updated_info = check_token_validity(st.session_state.token_code)
                     st.session_state.token_info = updated_info
-                    
-                    with st.spinner("Menelusuri internet & menganalisis dokumen... (Proses ini mungkin memakan waktu)"):
+               with st.spinner("Menelusuri internet & menganalisis dokumen... (Proses ini akan memakan waktu lama untuk 1 file penuh)"):
                         sentences = re.split(r'(?<=[.!?]) +', extracted_text)
                         valid_sentences = [s.strip() for s in sentences if len(s.split()) > 7]
                         
-                        # LIMIT SAMPEL: Mengecek 5 kalimat pertama untuk stabilitas waktu proses
-                        sentences_to_check = valid_sentences[:5] 
+                        # MENGHAPUS LIMIT: Sekarang memproses seluruh kalimat di dalam dokumen
+                        sentences_to_check = valid_sentences 
                         
                         found_sources = []
                         highlighted_html = ""
@@ -214,7 +214,17 @@ else:
                         matched_count = 0
                         
                         ddgs = DDGS()
+                        
+                        # MENAMBAHKAN PROGRESS BAR AGAR UI TIDAK HANG
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        total_sentences = len(sentences_to_check)
+                        
                         for i, sentence in enumerate(sentences_to_check):
+                            # Update indikator progress di layar
+                            status_text.text(f"Menganalisis kalimat {i+1} dari {total_sentences}...")
+                            progress_bar.progress((i + 1) / total_sentences)
+                            
                             try:
                                 search_results = list(ddgs.text(f'"{sentence}"', max_results=1))
                                 if search_results:
@@ -247,12 +257,21 @@ else:
                                                     <span style="font-size: 11px; color: #aaa;">Scraped via: BeautifulSoup</span>
                                                 </div>
                                             </span> """
+                                            # Jeda agar tidak kena blokir jika berhasil scrape
+                                            time.sleep(2) 
                                             continue 
                             except Exception: pass
                             
                             highlighted_html += f"{sentence} "
+                            
+                            # WAJIB ADA: Jeda 2 detik per pencarian untuk menghindari blokir IP (Rate Limit 429)
+                            time.sleep(2)
 
-                        similarity_percentage = int((matched_count / len(sentences_to_check)) * 100) if sentences_to_check else 0
+                        # Menghapus progress bar dari layar setelah selesai 100%
+                        progress_bar.empty()
+                        status_text.empty()
+
+                        similarity_percentage = int((matched_count / total_sentences) * 100) if total_sentences else 0
                         
                         st.markdown("---")
                         if similarity_percentage > 0:
