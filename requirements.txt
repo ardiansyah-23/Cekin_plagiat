@@ -4,3 +4,5 @@ PyPDF2
 duckduckgo-search
 beautifulsoup4
 requests
+python-docx
+fpdf
