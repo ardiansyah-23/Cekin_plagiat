@@ -1,12 +1,14 @@
 import streamlit as st
 import clickhouse_connect
 import PyPDF2
+import docx
 import uuid
 import re
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 from duckduckgo_search import DDGS
+from fpdf import FPDF
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(page_title="Sistem Cek Kemiripan Dokumen", layout="wide")
@@ -36,6 +38,40 @@ function togglePopup(element) {
 </script>
 """, unsafe_allow_html=True)
 
+# --- FUNGSI GENERATOR PDF REPORT ---
+def create_pdf_report(filename, similarity, sources):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, txt="Laporan Hasil Cek Plagiasi", ln=True, align='C')
+    pdf.ln(10)
+
+    pdf.set_font("Arial", '', 12)
+    pdf.cell(200, 10, txt=f"Nama Dokumen : {filename}", ln=True)
+    pdf.cell(200, 10, txt=f"Overall Similarity : {similarity}%", ln=True)
+    pdf.cell(200, 10, txt=f"Tanggal Cek : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True)
+    pdf.ln(10)
+
+    if sources:
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(200, 10, txt="Daftar Sumber Terdeteksi:", ln=True)
+        pdf.set_font("Arial", '', 10)
+        for src in sources:
+            # Membersihkan karakter aneh dari internet agar PDF tidak error
+            safe_title = str(src['title']).encode('latin-1', 'replace').decode('latin-1')
+            pdf.multi_cell(0, 8, txt=f"[{src['index']}] {safe_title}")
+            pdf.set_text_color(0, 0, 255)
+            pdf.multi_cell(0, 8, txt=f"Link: {src['url']}")
+            pdf.set_text_color(0, 0, 0)
+            pdf.ln(2)
+    else:
+        pdf.cell(200, 10, txt="Dokumen aman, tidak ada indikasi plagiasi.", ln=True)
+
+    # Mengembalikan file PDF dalam bentuk byte untuk diunduh
+    return bytes(pdf.output(dest='S').encode('latin-1'))
+
 # --- FUNGSI WEB SCRAPER DENGAN BEAUTIFULSOUP ---
 def scrape_web_text(url):
     try:
@@ -64,12 +100,8 @@ def get_db_client():
         user=ch_config["user"], password=ch_config["password"], secure=bool(ch_config.get("secure", True))
     )
 
-# ==========================================
-# LOGIKA 1: CEK VALIDITAS (TANPA POTONG KUOTA)
-# ==========================================
 def check_token_validity(token_input):
-    if token_input.strip() == "SAKTI-BYPASS-9999":
-        return True, {"package": "Akses Master", "remaining_quota": 9999}
+    if token_input.strip() == "SAKTI-BYPASS-9999": return True, {"package": "Akses Master", "remaining_quota": 9999}
     try:
         client = get_db_client()
         query = "SELECT package_name, quota FROM default.app_tokens WHERE token = {token:String} AND is_active = 1"
@@ -81,9 +113,6 @@ def check_token_validity(token_input):
     except Exception as e:
         return False, f"Kendala koneksi sistem: {e}"
 
-# ==========================================
-# LOGIKA 2: POTONG KUOTA SAAT KLIK TOMBOL CEK
-# ==========================================
 def redeem_token_quota(token_input):
     if token_input.strip() == "SAKTI-BYPASS-9999": return True
     try:
@@ -105,10 +134,7 @@ if st.session_state.authenticated:
     info = st.session_state.token_info
     st.sidebar.success(f"✅ Sesi Aktif\n- Paket: {info.get('package')}\n- Sisa Kuota: {info.get('remaining_quota')}x")
     if st.sidebar.button("Keluar / Ganti Token"):
-        st.session_state.authenticated = False
-        st.session_state.token_info = {}
-        st.session_state.token_code = ""
-        st.rerun()
+        st.session_state.authenticated = False; st.session_state.token_info = {}; st.session_state.token_code = ""; st.rerun()
 else: st.sidebar.info("💡 Anda belum memasukkan token. Token hanya dipotong saat dokumen diproses.")
 
 # ================= HALAMAN ADMIN =================
@@ -135,41 +161,52 @@ elif menu_option == "Login Token / Redeem":
         with st.spinner("Mengecek ketersediaan token..."):
             success, msg = check_token_validity(token_input.strip())
             if success:
-                st.session_state.authenticated = True
-                st.session_state.token_info = msg
-                st.session_state.token_code = token_input.strip()
+                st.session_state.authenticated = True; st.session_state.token_info = msg; st.session_state.token_code = token_input.strip()
                 st.success("Token valid! Anda bisa kembali ke Halaman Utama untuk mengecek dokumen.")
             else: st.error(msg)
 
 # ================= HALAMAN UTAMA =================
 else:
     st.title("📄 Sistem Pengecekan Kemiripan Dokumen")
-    st.caption("🔍 Engine: Turnitin-Style Web Search | Token dipotong saat tombol diklik")
+    st.caption("🔍 Engine: Turnitin-Style Web Search | Mendukung PDF, DOCX, TXT")
 
-    uploaded_file = st.file_uploader("Pilih dokumen berformat PDF", type="pdf")
+    # Menerima PDF, DOCX, dan TXT
+    uploaded_file = st.file_uploader("Pilih dokumen (Maks. 200MB)", type=["pdf", "docx", "txt"])
 
     if uploaded_file is not None:
-        pdf_reader = PyPDF2.PdfReader(uploaded_file)
-        total_pages = len(pdf_reader.pages)
+        extracted_text = ""
+        file_extension = uploaded_file.name.split('.')[-1].lower()
         
-        extracted_text = "".join(page.extract_text() + " " for page in pdf_reader.pages if page.extract_text())
+        # Logika Ekstraksi Teks Berdasarkan Format File
+        try:
+            if file_extension == "pdf":
+                pdf_reader = PyPDF2.PdfReader(uploaded_file)
+                extracted_text = "".join(page.extract_text() + " " for page in pdf_reader.pages if page.extract_text())
+            elif file_extension == "docx":
+                doc = docx.Document(uploaded_file)
+                extracted_text = " ".join(paragraph.text for paragraph in doc.paragraphs)
+            elif file_extension == "txt":
+                extracted_text = uploaded_file.getvalue().decode("utf-8")
+        except Exception as e:
+            st.error(f"Gagal membaca dokumen: {e}")
+            
         total_words = len(extracted_text.split())
-        st.write(f"**Dokumen diterima:** {uploaded_file.name} ({total_pages} Halaman, ±{total_words} Kata)")
+        st.write(f"**Dokumen diterima:** {uploaded_file.name} (±{total_words} Kata)")
         
         if st.button("Jalankan Pengecekan (Gunakan 1 Kuota)", type="primary"):
             if not st.session_state.authenticated:
                 st.warning("⚠️ Silakan validasi token di menu 'Login Token / Redeem' terlebih dahulu.")
             else:
-                # POTONG TOKEN DISINI
                 if redeem_token_quota(st.session_state.token_code):
-                    # Update sisa kuota di UI
                     _, updated_info = check_token_validity(st.session_state.token_code)
                     st.session_state.token_info = updated_info
                     
-                    with st.spinner("Memindai miliaran halaman internet..."):
+                    with st.spinner("Menelusuri internet & menganalisis dokumen... (Proses ini mungkin memakan waktu)"):
                         sentences = re.split(r'(?<=[.!?]) +', extracted_text)
                         valid_sentences = [s.strip() for s in sentences if len(s.split()) > 7]
-                        sentences_to_check = valid_sentences[:5] # Cek 5 kalimat sampel untuk stabilitas API
+                        
+                        # LIMIT SAMPEL: Mengecek 5 kalimat pertama untuk stabilitas waktu proses
+                        sentences_to_check = valid_sentences[:5] 
                         
                         found_sources = []
                         highlighted_html = ""
@@ -185,7 +222,6 @@ else:
                                     candidate_title = search_results[0].get("title", "Sumber Internet")
                                     
                                     if candidate_url:
-                                        # Scraper berjalan di sini
                                         scraped_content = scrape_web_text(candidate_url)
                                         if sentence.lower() in scraped_content.lower():
                                             matched_count += 1
@@ -197,10 +233,9 @@ else:
                                                 "url": candidate_url,
                                                 "title": candidate_title,
                                                 "color": bg_color,
-                                                "scraper_engine": "BeautifulSoup" # Info scraper disimpan di sini
+                                                "scraper_engine": "BeautifulSoup"
                                             })
                                             
-                                            # Format Teks Highlight ala Turnitin (Ditambah label scraper)
                                             highlighted_html += f"""
                                             <span class="highlight-container">
                                                 <span style="background-color: {bg_color}; padding: 2px; border-radius: 2px;" onclick="togglePopup(this)">
@@ -215,46 +250,50 @@ else:
                                             continue 
                             except Exception: pass
                             
-                            # Jika tidak plagiat, masukkan sebagai teks biasa tanpa span/warna
                             highlighted_html += f"{sentence} "
 
-                        # --- KALKULASI PERSENTASE TURNITIN-STYLE ---
                         similarity_percentage = int((matched_count / len(sentences_to_check)) * 100) if sentences_to_check else 0
                         
                         st.markdown("---")
                         if similarity_percentage > 0:
-                            # TAMPILAN JIKA TERDETEKSI PLAGIASI
                             col1, col2 = st.columns([2, 1])
                             with col1:
                                 st.write("### Pratinjau Dokumen")
                                 st.markdown(f'<div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0; font-family: serif;">{highlighted_html} ... [Sisa teks diproses]</div>', unsafe_allow_html=True)
-                            
                             with col2:
                                 st.write("### Integrity Overview")
                                 st.markdown(f'<div class="turnitin-source-list"><p class="turnitin-score">{similarity_percentage}%</p><p style="font-weight:bold; color:#555;">Overall Similarity</p><hr>', unsafe_allow_html=True)
-                                
                                 for src in found_sources:
-                                    # Label scraper ditampilkan di sidebar
                                     st.markdown(f"""
                                     <div style="margin-bottom: 12px; line-height: 1.3;">
                                         <span style="background-color: {src['color']}; padding: 2px 6px; font-weight: bold; border-radius: 3px; font-size: 12px;">{src['index']}</span>
-                                        <span style="font-size: 14px; margin-left: 5px;">
-                                            <a href="{src['url']}" target="_blank" style="color: #333; text-decoration: none;">{src['title'][:35]}...</a>
-                                        </span><br>
+                                        <span style="font-size: 14px; margin-left: 5px;"><a href="{src['url']}" target="_blank" style="color: #333; text-decoration: none;">{src['title'][:35]}...</a></span><br>
                                         <span style="font-size: 11px; color: #888; margin-left: 30px;">Scraped via: {src['scraper_engine']}</span>
                                     </div>
                                     """, unsafe_allow_html=True)
                                 st.markdown("</div>", unsafe_allow_html=True)
                         else:
-                            # TAMPILAN JIKA 100% AMAN (TEKS BIASA, TANPA STABILO IJO)
                             col1, col2 = st.columns([2, 1])
                             with col1:
                                 st.write("### Pratinjau Dokumen")
                                 safe_text = " ".join(sentences_to_check)
                                 st.markdown(f'<div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0; font-family: serif;">{safe_text} ... [Sisa teks diproses]</div>', unsafe_allow_html=True)
-                            
                             with col2:
                                 st.write("### Integrity Overview")
                                 st.markdown('<div class="turnitin-source-list"><p style="font-size: 48px; font-weight: bold; color: #28a745; margin-bottom: 0;">0%</p><p style="font-weight:bold; color:#555;">Overall Similarity</p><hr><p style="color:#777; font-size:14px;">Bebas dari deteksi plagiasi internet.</p></div>', unsafe_allow_html=True)
+                        
+                        # --- TOMBOL UNDUH LAPORAN PDF ---
+                        st.markdown("---")
+                        try:
+                            pdf_data = create_pdf_report(uploaded_file.name, similarity_percentage, found_sources)
+                            st.download_button(
+                                label="📥 Unduh Laporan PDF (Cetak Hasil)",
+                                data=pdf_data,
+                                file_name=f"Laporan_Plagiasi_{uploaded_file.name}.pdf",
+                                mime="application/pdf",
+                                type="primary"
+                            )
+                        except Exception as e:
+                            st.error(f"Gagal membuat laporan PDF: {e}")
                 else:
                     st.error("Gagal memotong kuota. Pastikan token Anda masih memiliki sisa kuota yang valid.")
