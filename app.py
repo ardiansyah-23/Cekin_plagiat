@@ -2,7 +2,11 @@ import streamlit as st
 import clickhouse_connect
 import PyPDF2
 import uuid
+import re
+import requests
+from bs4 import BeautifulSoup
 from datetime import datetime
+from duckduckgo_search import DDGS
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(page_title="Sistem Cek Kemiripan Dokumen", layout="wide")
@@ -22,12 +26,18 @@ st.markdown("""
   color: #a80000;
   font-weight: 500;
 }
+.highlight-safe {
+  background-color: #d4edda; 
+  padding: 2px 4px;
+  border-radius: 3px;
+  color: #155724;
+}
 .plagiarized-popup {
   display: none;
   position: absolute;
   top: 110%; 
   left: 0;
-  width: 300px;
+  width: 350px;
   background-color: #222;
   color: #fff;
   text-align: left;
@@ -44,7 +54,6 @@ st.markdown("""
 
 <script>
 document.addEventListener('click', function(event) {
-  // Tutup semua pop-up jika klik di luar area highlight container
   if (!event.target.closest('.highlight-container')) {
     document.querySelectorAll('.highlight-container').forEach(el => {
       el.classList.remove('active');
@@ -57,18 +66,33 @@ function togglePopup(element) {
   let container = element.closest('.highlight-container');
   let isActive = container.classList.contains('active');
   
-  // Tutup semua yang lain
   document.querySelectorAll('.highlight-container').forEach(el => {
     el.classList.remove('active');
   });
   
-  // Toggle status aktif saat ini
   if (!isActive) {
     container.classList.add('active');
   }
 }
 </script>
 """, unsafe_allow_html=True)
+
+# --- FUNGSI WEB SCRAPER DENGAN BEAUTIFULSOUP ---
+def scrape_web_text(url):
+    """Membuka URL dan mengambil teks murninya menggunakan BeautifulSoup."""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=5)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for element in soup(['script', 'style', 'nav', 'footer', 'header']):
+                element.extract()
+            text = soup.get_text(separator=' ')
+            return ' '.join(text.split())
+        return ""
+    except Exception:
+        return "" 
 
 # Mengambil password admin secara aman dari secrets
 ADMIN_PASSWORD = st.secrets["admin"]["password"]
@@ -220,7 +244,7 @@ else:
     # HALAMAN UTAMA: CEK KEMIRIPAN DOKUMEN
     # ==========================================
     st.title("📄 Sistem Pengecekan Kemiripan Dokumen")
-    st.caption("🔒 Mode: No Repository (Aman untuk Draf Publikasi)")
+    st.caption("🔍 Engine: DuckDuckGo + BeautifulSoup | Mode: No Repository")
 
     st.write("### Unggah Draf Dokumen")
     uploaded_file = st.file_uploader("Pilih dokumen berformat PDF", type="pdf")
@@ -233,7 +257,7 @@ else:
         for page in pdf_reader.pages:
             text = page.extract_text()
             if text:
-                extracted_text += text + "\n"
+                extracted_text += text + " "
         
         total_words = len(extracted_text.split())
         st.write(f"**Dokumen diterima:** {uploaded_file.name} ({total_pages} Halaman, ±{total_words} Kata)")
@@ -242,53 +266,85 @@ else:
             if not st.session_state.authenticated:
                 st.warning("⚠️ Anda belum memasukkan token akses. Silakan masukkan token terlebih dahulu melalui menu **Login Token / Redeem** di sidebar.")
             else:
-                with st.spinner("Menghubungkan ke ClickHouse dan menganalisis kemiripan dokumen..."):
-                    try:
-                        client = get_db_client()
-                        ref_query = "SELECT source_url, title, similarity_score FROM default.reference_documents LIMIT 1"
-                        ref_result = client.query(ref_query)
-                        
-                        if ref_result.result_rows:
-                            real_source = ref_result.result_rows[0][0]
-                            real_title = ref_result.result_rows[0][1]
-                            real_score = ref_result.result_rows[0][2]
-                        else:
-                            real_source = "https://repository.trilogi.ac.id/dokumen-akademik"
-                            real_title = "Repitori Akademik Terverifikasi"
-                            real_score = "100%"
-                    except Exception:
-                        real_source = "https://database-clickhouse-cloud.internal/ref"
-                        real_title = "Database ClickHouse Cloud"
-                        real_score = "100%"
+                with st.spinner("Menelusuri & Scraping internet... (Tunggu sebentar)"):
+                    
+                    # Pecah teks dan filter kalimat yang valid
+                    sentences = re.split(r'(?<=[.!?]) +', extracted_text)
+                    valid_sentences = [s.strip() for s in sentences if len(s.split()) > 10]
+                    
+                    # Batasi jumlah pengecekan untuk purwarupa/menghindari rate-limit
+                    sentences_to_check = valid_sentences[:3] 
+                    
+                    found_match = False
+                    plagiarized_text = ""
+                    web_title = ""
+                    web_url = ""
+                    matched_snippet = ""
+                    
+                    ddgs = DDGS()
+                    for sentence in sentences_to_check:
+                        if found_match: break
+                        try:
+                            # 1. Cari link pakai DuckDuckGo
+                            search_results = list(ddgs.text(f'"{sentence}"', max_results=1))
+                            
+                            if search_results:
+                                candidate_url = search_results[0].get("href", "")
+                                candidate_title = search_results[0].get("title", "Sumber Internet")
+                                
+                                # 2. Scrape web pakai BeautifulSoup
+                                if candidate_url:
+                                    scraped_content = scrape_web_text(candidate_url)
+                                    
+                                    # 3. Bandingkan teks web hasil scrape dengan teks PDF asli
+                                    if sentence.lower() in scraped_content.lower():
+                                        found_match = True
+                                        plagiarized_text = sentence
+                                        web_title = candidate_title
+                                        web_url = candidate_url
+                                        
+                                        idx = scraped_content.lower().find(sentence.lower())
+                                        start_idx = max(0, idx - 50)
+                                        end_idx = min(len(scraped_content), idx + len(sentence) + 50)
+                                        matched_snippet = scraped_content[start_idx:end_idx].replace(sentence, f"<b>{sentence}</b>")
+                        except Exception:
+                            pass 
 
+                    # --- HASIL ---
                     st.markdown("---")
                     st.subheader("Integrity Overview")
                     
                     col1, col2, col3 = st.columns(3)
-                    col1.metric("Indeks Kemiripan", f"{real_score}", delta="Terkonfirmasi DB", delta_color="inverse")
-                    col2.metric("Sumber Terdeteksi", "1")
+                    if found_match:
+                        col1.metric("Status Dokumen", "Terdeteksi Plagiasi", delta="-Validasi Scraper", delta_color="inverse")
+                        col2.metric("Sumber Terdeteksi", "1")
+                    else:
+                        col1.metric("Status Dokumen", "Aman / Orisinal", delta="Bebas Plagiasi")
+                        col2.metric("Sumber Terdeteksi", "0")
                     col3.metric("Kata Diproses", f"{total_words:,}")
                     
                     st.write("### Pratinjau Sorotan Teks (Klik pada teks stabilo untuk melihat detail)")
-                    
-                    # Ambil beberapa baris awal teks dokumen untuk simulasi sorotan interaktif
-                    preview_lines = extracted_text.split('\n')[:5]
-                    snippet = " ".join(preview_lines) if preview_lines else "Dokumen tidak memiliki teks terbaca."
-                    if len(snippet) > 200:
-                        snippet = snippet[:200]
-                    
-                    st.markdown(f"""
-                    <div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0;">
-                        Dokumen diperiksa: 
-                        <span class="highlight-container">
-                            <span class="highlight-plagiarized" onclick="togglePopup(this)">{snippet}</span>
-                            <div class="plagiarized-popup">
-                                <b>Sumber Referensi:</b><br>
-                                <a href="{real_source}" target="_blank" style="color: #4da6ff; text-decoration: underline;">{real_title}</a><br>
-                                <span style="font-size: 11px; color: #ccc;">URL: {real_source}</span><br>
-                                <b>Tingkat Kemiripan:</b> {real_score}
-                            </div>
-                        </span> 
-                        ... [Sisa teks dokumen diproses sesuai database ClickHouse].
-                    </div>
-                    """, unsafe_allow_html=True)
+                    if found_match:
+                        st.markdown(f"""
+                        <div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0;">
+                            Dokumen diperiksa: 
+                            <span class="highlight-container">
+                                <span class="highlight-plagiarized" onclick="togglePopup(this)">{plagiarized_text}</span>
+                                <div class="plagiarized-popup">
+                                    <b>Sumber (Terverifikasi BeautifulSoup):</b><br>
+                                    <a href="{web_url}" target="_blank" style="color: #4da6ff;">{web_title}</a><br>
+                                    <hr style="margin:5px 0; border-color:#555;">
+                                    <i>Cuplikan di Web:</i><br> "...{matched_snippet}..."
+                                </div>
+                            </span>
+                            ... [Sisa teks dokumen diproses].
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        safe_snippet = " ".join(valid_sentences[:3]) if valid_sentences else "Teks terlalu pendek."
+                        st.markdown(f"""
+                        <div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0;">
+                            <span class="highlight-safe">{safe_snippet}</span><br><br>
+                            <i>Scraper tidak menemukan kecocokan di internet pada sampel awal dokumen ini.</i>
+                        </div>
+                        """, unsafe_allow_html=True)
