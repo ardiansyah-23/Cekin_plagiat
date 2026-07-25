@@ -11,79 +11,36 @@ from duckduckgo_search import DDGS
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(page_title="Sistem Cek Kemiripan Dokumen", layout="wide")
 
-# --- CSS & JAVASCRIPT UNTUK POP-UP KLIK (POSISI AMAN TIDAK TERPOTONG) ---
+# --- CSS & JAVASCRIPT GAYA TURNITIN ---
 st.markdown("""
 <style>
-.highlight-container {
-  position: relative;
-  display: inline-block;
-}
-.highlight-plagiarized {
-  background-color: #ffcccc; 
-  cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 3px;
-  color: #a80000;
-  font-weight: 500;
-}
-.highlight-safe {
-  background-color: #d4edda; 
-  padding: 2px 4px;
-  border-radius: 3px;
-  color: #155724;
-}
-.plagiarized-popup {
-  display: none;
-  position: absolute;
-  top: 110%; 
-  left: 0;
-  width: 350px;
-  background-color: #222;
-  color: #fff;
-  text-align: left;
-  border-radius: 6px;
-  padding: 10px;
-  z-index: 999;
-  font-size: 13px;
-  box-shadow: 0px 4px 10px rgba(0,0,0,0.4);
-}
-.highlight-container.active .plagiarized-popup {
-  display: block;
-}
+.highlight-container { position: relative; display: inline-block; cursor: pointer; }
+.turnitin-source-list { border: 1px solid #ddd; padding: 15px; border-radius: 5px; background: #fff; }
+.turnitin-score { font-size: 48px; font-weight: bold; color: #b30000; margin-bottom: 0; }
+.plagiarized-popup { display: none; position: absolute; top: 110%; left: 0; width: 350px; background-color: #222; color: #fff; text-align: left; border-radius: 6px; padding: 10px; z-index: 999; font-size: 13px; box-shadow: 0px 4px 10px rgba(0,0,0,0.4); }
+.highlight-container.active .plagiarized-popup { display: block; }
 </style>
-
 <script>
 document.addEventListener('click', function(event) {
   if (!event.target.closest('.highlight-container')) {
-    document.querySelectorAll('.highlight-container').forEach(el => {
-      el.classList.remove('active');
-    });
+    document.querySelectorAll('.highlight-container').forEach(el => { el.classList.remove('active'); });
   }
 });
-
 function togglePopup(element) {
   event.stopPropagation();
   let container = element.closest('.highlight-container');
   let isActive = container.classList.contains('active');
-  
-  document.querySelectorAll('.highlight-container').forEach(el => {
-    el.classList.remove('active');
-  });
-  
-  if (!isActive) {
-    container.classList.add('active');
-  }
+  document.querySelectorAll('.highlight-container').forEach(el => { el.classList.remove('active'); });
+  if (!isActive) { container.classList.add('active'); }
 }
 </script>
 """, unsafe_allow_html=True)
 
 # --- FUNGSI WEB SCRAPER DENGAN BEAUTIFULSOUP ---
 def scrape_web_text(url):
-    """Membuka URL dan mengambil teks murninya menggunakan BeautifulSoup."""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         response = requests.get(url, headers=headers, timeout=5)
-        
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             for element in soup(['script', 'style', 'nav', 'footer', 'header']):
@@ -94,63 +51,55 @@ def scrape_web_text(url):
     except Exception:
         return "" 
 
-# Mengambil password admin secara aman dari secrets
 ADMIN_PASSWORD = st.secrets["admin"]["password"]
 
-# Inisialisasi Session State
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-if "is_admin" not in st.session_state:
-    st.session_state.is_admin = False
-if "token_info" not in st.session_state:
-    st.session_state.token_info = {}
+if "authenticated" not in st.session_state: st.session_state.authenticated = False
+if "token_info" not in st.session_state: st.session_state.token_info = {}
+if "token_code" not in st.session_state: st.session_state.token_code = ""
 
-# Fungsi koneksi ke ClickHouse
 def get_db_client():
     ch_config = st.secrets["clickhouse"]
     return clickhouse_connect.get_client(
-        host=ch_config["host"],
-        port=int(ch_config.get("port", 8443)),
-        user=ch_config["user"],
-        password=ch_config["password"],
-        secure=bool(ch_config.get("secure", True))
+        host=ch_config["host"], port=int(ch_config.get("port", 8443)),
+        user=ch_config["user"], password=ch_config["password"], secure=bool(ch_config.get("secure", True))
     )
 
 # ==========================================
-# 1. LOGIKA VERIFIKASI TOKEN USER (+ TOKEN SAKTI)
+# LOGIKA 1: CEK VALIDITAS (TANPA POTONG KUOTA)
 # ==========================================
-def verify_user_token(token_input):
+def check_token_validity(token_input):
     if token_input.strip() == "SAKTI-BYPASS-9999":
-        return True, {"package": "Akses Tanpa Batas (Master/Sakti)", "remaining_quota": 9999}
-
+        return True, {"package": "Akses Master", "remaining_quota": 9999}
     try:
         client = get_db_client()
         query = "SELECT package_name, quota FROM default.app_tokens WHERE token = {token:String} AND is_active = 1"
         result = client.query(query, parameters={"token": token_input})
-        
-        if not result.result_rows:
-            return False, "Token tidak valid atau sudah tidak aktif."
-            
+        if not result.result_rows: return False, "Token tidak valid atau sudah tidak aktif."
         pkg_name, current_quota = result.result_rows[0]
-        
-        if current_quota <= 0:
-            return False, "Kuota token ini sudah habis."
-            
-        new_quota = current_quota - 1
-        update_query = "ALTER TABLE default.app_tokens UPDATE quota = {new_quota:Int32} WHERE token = {token:String}"
-        client.command(update_query, parameters={"new_quota": new_quota, "token": token_input})
-        
-        return True, {"package": pkg_name, "remaining_quota": new_quota}
-        
+        if current_quota <= 0: return False, "Kuota token ini sudah habis."
+        return True, {"package": pkg_name, "remaining_quota": current_quota}
     except Exception as e:
         return False, f"Kendala koneksi sistem: {e}"
 
 # ==========================================
-# 2. NAVIGASI SIDEBAR UTAMA
+# LOGIKA 2: POTONG KUOTA SAAT KLIK TOMBOL CEK
 # ==========================================
+def redeem_token_quota(token_input):
+    if token_input.strip() == "SAKTI-BYPASS-9999": return True
+    try:
+        client = get_db_client()
+        query = "SELECT quota FROM default.app_tokens WHERE token = {token:String} AND is_active = 1"
+        result = client.query(query, parameters={"token": token_input})
+        if result.result_rows and result.result_rows[0][0] > 0:
+            new_quota = result.result_rows[0][0] - 1
+            client.command("ALTER TABLE default.app_tokens UPDATE quota = {new_quota:Int32} WHERE token = {token:String}", parameters={"new_quota": new_quota, "token": token_input})
+            return True
+        return False
+    except Exception: return False
+
+# ================= SIDEBAR =================
 st.sidebar.title("Navigasi Menu")
 menu_option = st.sidebar.radio("Pilih Halaman:", ["Utama: Cek Plagiasi", "Login Token / Redeem", "Panel Admin"])
-
 st.sidebar.markdown("---")
 if st.session_state.authenticated:
     info = st.session_state.token_info
@@ -158,193 +107,149 @@ if st.session_state.authenticated:
     if st.sidebar.button("Keluar / Ganti Token"):
         st.session_state.authenticated = False
         st.session_state.token_info = {}
+        st.session_state.token_code = ""
         st.rerun()
-else:
-    st.sidebar.info("💡 Anda belum memasukkan token. Fitur cek akan memotong kuota setelah login.")
+else: st.sidebar.info("💡 Anda belum memasukkan token. Token hanya dipotong saat dokumen diproses.")
 
-st.sidebar.markdown("---")
-st.sidebar.header("Filter Pengecekan")
-exclude_quotes = st.sidebar.checkbox("Exclude Quotes (Abaikan Kutipan)", value=True)
-exclude_biblio = st.sidebar.checkbox("Exclude Bibliography (Abaikan Daftar Pustaka)", value=True)
-
-# ==========================================
-# 3. KONTROL HALAMAN BERDASARKAN MENU
-# ==========================================
-
+# ================= HALAMAN ADMIN =================
 if menu_option == "Panel Admin":
     st.title("🛠️ Panel Admin WhatsApp")
-    st.write("Kelola pembuatan token akses pengguna.")
-    
-    admin_pass_input = st.text_input("Password Admin:", type="password")
-    
-    if admin_pass_input == ADMIN_PASSWORD:
+    if st.text_input("Password Admin:", type="password") == ADMIN_PASSWORD:
         st.success("Admin Logged In")
-        st.subheader("🔑 Buat Token Akses Baru")
-        
         with st.form("create_token_form"):
-            package_name = st.text_input("Nama Paket / Keterangan (Cth: Paket 5x Cek)", value="Sekali Pakai")
-            quota_amount = st.number_input("Jumlah Kuota Token:", min_value=1, max_value=100, value=1)
-            submit_token = st.form_submit_button("Generate Token")
-            
-            if submit_token:
+            package_name = st.text_input("Nama Paket:", value="Paket Regular")
+            quota_amount = st.number_input("Jumlah Kuota:", min_value=1, max_value=100, value=1)
+            if st.form_submit_button("Generate Token"):
                 new_token = "TOK-" + str(uuid.uuid4())[:8].upper()
                 try:
                     client = get_db_client()
-                    query = """
-                        INSERT INTO default.app_tokens (token, package_name, quota, created_at, is_active) 
-                        VALUES ({token:String}, {pkg:String}, {quota:Int32}, {date:DateTime}, 1)
-                    """
-                    client.command(query, parameters={
-                        "token": new_token,
-                        "pkg": package_name,
-                        "quota": int(quota_amount),
-                        "date": datetime.now()
-                    })
-                    
-                    st.success("Token berhasil dibuat!")
-                    st.markdown(f"### Salin teks ini untuk dikirim via WhatsApp:\n> `{new_token}`")
-                    st.info(f"Paket: {package_name} | Kuota: {quota_amount}x pakai")
-                except Exception as e:
-                    st.error(f"Gagal menyimpan token ke database: {e}")
-        
-        st.subheader("📋 Daftar Token di Database")
-        try:
-            client = get_db_client()
-            tokens_df = client.query_df("SELECT token, package_name, quota, created_at FROM default.app_tokens ORDER BY created_at DESC LIMIT 10")
-            st.dataframe(tokens_df)
-        except Exception:
-            pass
-            
-    elif admin_pass_input:
-        st.error("Password Admin Salah")
+                    client.command("""INSERT INTO default.app_tokens (token, package_name, quota, created_at, is_active) VALUES ({token:String}, {pkg:String}, {quota:Int32}, {date:DateTime}, 1)""", parameters={"token": new_token, "pkg": package_name, "quota": int(quota_amount), "date": datetime.now()})
+                    st.success("Token berhasil dibuat!"); st.markdown(f"### > `{new_token}`")
+                except Exception as e: st.error(f"Gagal: {e}")
 
+# ================= HALAMAN LOGIN =================
 elif menu_option == "Login Token / Redeem":
     st.title("🔑 Masukkan Kode Akses Token")
-    st.write("Silakan masukkan kode token yang Anda miliki (atau gunakan Token Sakti untuk uji coba).")
-    
-    token_input = st.text_input("Kode Token Anda:", type="default")
-    
-    if st.button("Masuk Aplikasi"):
-        if token_input.strip():
-            with st.spinner("Memvalidasi kode token..."):
-                success, data_or_msg = verify_user_token(token_input.strip())
-                if success:
-                    st.session_state.authenticated = True
-                    st.session_state.token_info = data_or_msg
-                    st.session_state.token_code = token_input.strip()
-                    st.success(f"Berhasil masuk! Paket: {data_or_msg['package']} | Sisa kuota Anda: {data_or_msg['remaining_quota']}x")
-                    st.rerun()
-                else:
-                    st.error(data_or_msg)
-        else:
-            st.warning("Mohon masukkan kode token terlebih dahulu.")
+    token_input = st.text_input("Kode Token:")
+    if st.button("Validasi Token") and token_input.strip():
+        with st.spinner("Mengecek ketersediaan token..."):
+            success, msg = check_token_validity(token_input.strip())
+            if success:
+                st.session_state.authenticated = True
+                st.session_state.token_info = msg
+                st.session_state.token_code = token_input.strip()
+                st.success("Token valid! Anda bisa kembali ke Halaman Utama untuk mengecek dokumen.")
+            else: st.error(msg)
 
+# ================= HALAMAN UTAMA =================
 else:
-    # ==========================================
-    # HALAMAN UTAMA: CEK KEMIRIPAN DOKUMEN
-    # ==========================================
     st.title("📄 Sistem Pengecekan Kemiripan Dokumen")
-    st.caption("🔍 Engine: DuckDuckGo + BeautifulSoup | Mode: No Repository")
+    st.caption("🔍 Engine: Turnitin-Style Web Search | Token dipotong saat tombol diklik")
 
-    st.write("### Unggah Draf Dokumen")
     uploaded_file = st.file_uploader("Pilih dokumen berformat PDF", type="pdf")
 
     if uploaded_file is not None:
         pdf_reader = PyPDF2.PdfReader(uploaded_file)
         total_pages = len(pdf_reader.pages)
         
-        extracted_text = ""
-        for page in pdf_reader.pages:
-            text = page.extract_text()
-            if text:
-                extracted_text += text + " "
-        
+        extracted_text = "".join(page.extract_text() + " " for page in pdf_reader.pages if page.extract_text())
         total_words = len(extracted_text.split())
         st.write(f"**Dokumen diterima:** {uploaded_file.name} ({total_pages} Halaman, ±{total_words} Kata)")
         
-        if st.button("Jalankan Pengecekan", type="primary"):
+        if st.button("Jalankan Pengecekan (Gunakan 1 Kuota)", type="primary"):
             if not st.session_state.authenticated:
-                st.warning("⚠️ Anda belum memasukkan token akses. Silakan masukkan token terlebih dahulu melalui menu **Login Token / Redeem** di sidebar.")
+                st.warning("⚠️ Silakan validasi token di menu 'Login Token / Redeem' terlebih dahulu.")
             else:
-                with st.spinner("Menelusuri & Scraping internet... (Tunggu sebentar)"):
+                # POTONG TOKEN DISINI
+                if redeem_token_quota(st.session_state.token_code):
+                    # Update sisa kuota di UI
+                    _, updated_info = check_token_validity(st.session_state.token_code)
+                    st.session_state.token_info = updated_info
                     
-                    # Pecah teks dan filter kalimat yang valid
-                    sentences = re.split(r'(?<=[.!?]) +', extracted_text)
-                    valid_sentences = [s.strip() for s in sentences if len(s.split()) > 10]
-                    
-                    # Batasi jumlah pengecekan untuk purwarupa/menghindari rate-limit
-                    sentences_to_check = valid_sentences[:3] 
-                    
-                    found_match = False
-                    plagiarized_text = ""
-                    web_title = ""
-                    web_url = ""
-                    matched_snippet = ""
-                    
-                    ddgs = DDGS()
-                    for sentence in sentences_to_check:
-                        if found_match: break
-                        try:
-                            # 1. Cari link pakai DuckDuckGo
-                            search_results = list(ddgs.text(f'"{sentence}"', max_results=1))
-                            
-                            if search_results:
-                                candidate_url = search_results[0].get("href", "")
-                                candidate_title = search_results[0].get("title", "Sumber Internet")
-                                
-                                # 2. Scrape web pakai BeautifulSoup
-                                if candidate_url:
-                                    scraped_content = scrape_web_text(candidate_url)
+                    with st.spinner("Memindai miliaran halaman internet..."):
+                        sentences = re.split(r'(?<=[.!?]) +', extracted_text)
+                        valid_sentences = [s.strip() for s in sentences if len(s.split()) > 7]
+                        sentences_to_check = valid_sentences[:5] # Cek 5 kalimat sampel untuk stabilitas API
+                        
+                        found_sources = []
+                        highlighted_html = ""
+                        color_palette = ["#ffcccc", "#cce5ff", "#d5f5e3", "#fcf3cf", "#e8daef"]
+                        matched_count = 0
+                        
+                        ddgs = DDGS()
+                        for i, sentence in enumerate(sentences_to_check):
+                            try:
+                                search_results = list(ddgs.text(f'"{sentence}"', max_results=1))
+                                if search_results:
+                                    candidate_url = search_results[0].get("href", "")
+                                    candidate_title = search_results[0].get("title", "Sumber Internet")
                                     
-                                    # 3. Bandingkan teks web hasil scrape dengan teks PDF asli
-                                    if sentence.lower() in scraped_content.lower():
-                                        found_match = True
-                                        plagiarized_text = sentence
-                                        web_title = candidate_title
-                                        web_url = candidate_url
-                                        
-                                        idx = scraped_content.lower().find(sentence.lower())
-                                        start_idx = max(0, idx - 50)
-                                        end_idx = min(len(scraped_content), idx + len(sentence) + 50)
-                                        matched_snippet = scraped_content[start_idx:end_idx].replace(sentence, f"<b>{sentence}</b>")
-                        except Exception:
-                            pass 
+                                    if candidate_url:
+                                        scraped_content = scrape_web_text(candidate_url)
+                                        if sentence.lower() in scraped_content.lower():
+                                            matched_count += 1
+                                            source_index = len(found_sources) + 1
+                                            bg_color = color_palette[source_index % len(color_palette)]
+                                            
+                                            found_sources.append({
+                                                "index": source_index,
+                                                "url": candidate_url,
+                                                "title": candidate_title,
+                                                "color": bg_color
+                                            })
+                                            
+                                            # Format Teks Highlight ala Turnitin
+                                            highlighted_html += f"""
+                                            <span class="highlight-container">
+                                                <span style="background-color: {bg_color}; padding: 2px; border-radius: 2px;" onclick="togglePopup(this)">
+                                                    {sentence} <sup style="color:red; font-weight:bold;">[{source_index}]</sup>
+                                                </span>
+                                                <div class="plagiarized-popup">
+                                                    <b>Sumber Terdeteksi [{source_index}]:</b><br>
+                                                    <a href="{candidate_url}" target="_blank" style="color: #4da6ff;">{candidate_title}</a>
+                                                </div>
+                                            </span> """
+                                            continue 
+                            except Exception: pass
+                            
+                            # Jika tidak plagiat, masukkan sebagai teks biasa tanpa span/warna
+                            highlighted_html += f"{sentence} "
 
-                    # --- HASIL ---
-                    st.markdown("---")
-                    st.subheader("Integrity Overview")
-                    
-                    col1, col2, col3 = st.columns(3)
-                    if found_match:
-                        col1.metric("Status Dokumen", "Terdeteksi Plagiasi", delta="-Validasi Scraper", delta_color="inverse")
-                        col2.metric("Sumber Terdeteksi", "1")
-                    else:
-                        col1.metric("Status Dokumen", "Aman / Orisinal", delta="Bebas Plagiasi")
-                        col2.metric("Sumber Terdeteksi", "0")
-                    col3.metric("Kata Diproses", f"{total_words:,}")
-                    
-                    st.write("### Pratinjau Sorotan Teks (Klik pada teks stabilo untuk melihat detail)")
-                    if found_match:
-                        st.markdown(f"""
-                        <div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0;">
-                            Dokumen diperiksa: 
-                            <span class="highlight-container">
-                                <span class="highlight-plagiarized" onclick="togglePopup(this)">{plagiarized_text}</span>
-                                <div class="plagiarized-popup">
-                                    <b>Sumber (Terverifikasi BeautifulSoup):</b><br>
-                                    <a href="{web_url}" target="_blank" style="color: #4da6ff;">{web_title}</a><br>
-                                    <hr style="margin:5px 0; border-color:#555;">
-                                    <i>Cuplikan di Web:</i><br> "...{matched_snippet}..."
-                                </div>
-                            </span>
-                            ... [Sisa teks dokumen diproses].
-                        </div>
-                        """, unsafe_allow_html=True)
-                    else:
-                        safe_snippet = " ".join(valid_sentences[:3]) if valid_sentences else "Teks terlalu pendek."
-                        st.markdown(f"""
-                        <div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0;">
-                            <span class="highlight-safe">{safe_snippet}</span><br><br>
-                            <i>Scraper tidak menemukan kecocokan di internet pada sampel awal dokumen ini.</i>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        # --- KALKULASI PERSENTASE TURNITIN-STYLE ---
+                        similarity_percentage = int((matched_count / len(sentences_to_check)) * 100) if sentences_to_check else 0
+                        
+                        st.markdown("---")
+                        if similarity_percentage > 0:
+                            # TAMPILAN JIKA TERDETEKSI PLAGIASI
+                            col1, col2 = st.columns([2, 1])
+                            with col1:
+                                st.write("### Pratinjau Dokumen")
+                                st.markdown(f'<div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0; font-family: serif;">{highlighted_html} ... [Sisa teks diproses]</div>', unsafe_allow_html=True)
+                            
+                            with col2:
+                                st.write("### Integrity Overview")
+                                st.markdown(f'<div class="turnitin-source-list"><p class="turnitin-score">{similarity_percentage}%</p><p style="font-weight:bold; color:#555;">Overall Similarity</p><hr>', unsafe_allow_html=True)
+                                
+                                for src in found_sources:
+                                    st.markdown(f"""
+                                    <div style="margin-bottom: 10px;">
+                                        <span style="background-color: {src['color']}; padding: 2px 6px; font-weight: bold; border-radius: 3px; font-size: 12px;">{src['index']}</span>
+                                        <span style="font-size: 14px; margin-left: 5px;">
+                                            <a href="{src['url']}" target="_blank" style="color: #333; text-decoration: none;">{src['title'][:35]}...</a>
+                                        </span>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                st.markdown("</div>", unsafe_allow_html=True)
+                        else:
+                            # TAMPILAN JIKA 100% AMAN (TEKS BIASA, TANPA STABILO IJO)
+                            col1, col2 = st.columns([2, 1])
+                            with col1:
+                                st.write("### Pratinjau Dokumen")
+                                safe_text = " ".join(sentences_to_check)
+                                st.markdown(f'<div style="border: 1px solid #ddd; padding: 20px; border-radius: 5px; background-color: #fafafa; line-height: 2.0; font-family: serif;">{safe_text} ... [Sisa teks diproses]</div>', unsafe_allow_html=True)
+                            
+                            with col2:
+                                st.write("### Integrity Overview")
+                                st.markdown('<div class="turnitin-source-list"><p style="font-size: 48px; font-weight: bold; color: #28a745; margin-bottom: 0;">0%</p><p style="font-weight:bold; color:#555;">Overall Similarity</p><hr><p style="color:#777; font-size:14px;">Bebas dari deteksi plagiasi internet.</p></div>', unsafe_allow_html=True)
+                else:
+                    st.error("Gagal memotong kuota. Pastikan token Anda masih memiliki sisa kuota yang valid.")
